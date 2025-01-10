@@ -15,11 +15,11 @@ api_token = os.getenv("CF_API_TOKEN")
 zone_id = os.getenv("CF_ZONE_ID")
 record_id = os.getenv("CF_RECORD_ID")
 domain = os.getenv("CF_DOMAIN")
-ip_cache_file = os.getenv("IP_CACHE_FILE", "/tmp/last_ip.txt")
+ip_cache_file = os.getenv("IP_CACHE_FILE", "/tmp/last_ip.tmp")
 
 # 邮件配置
 smtp_server = os.getenv("SMTP_SERVER")
-smtp_port = int(os.getenv("SMTP_PORT", "587"))
+smtp_port = int(os.getenv("SMTP_PORT") or 587)
 email_user = os.getenv("EMAIL_USER")
 email_pass = os.getenv("EMAIL_PASS")
 recipient_email = os.getenv("RECIPIENT_EMAIL")
@@ -96,6 +96,74 @@ def send_email(subject, body):
         server.login(email_user, email_pass)
         server.send_message(msg)
 
+# 根据域名获取 zone_id 和 record_id
+def get_zone_and_record_ids(domain):
+    """
+    根据域名获取 zone_id 和 record_id
+    例如: test.a.b 会查找 name 为 a.b 的 zone
+    然后查询 test.a.b 的 record id
+    
+    Args:
+        domain: 完整域名，如 test.a.b
+        
+    Returns:
+        tuple: (zone_id, record_id) 或 (None, None)
+    """
+    # 分割域名，获取主域名
+    parts = domain.split('.')
+    if len(parts) < 2:
+        logger.error(f"无效的域名格式: {domain}")
+        return None, None
+        
+    # 构建可能的主域名组合
+    possible_zones = []
+    for i in range(1, len(parts)):
+        possible_zones.append('.'.join(parts[i:]))
+    
+    # 获取所有zones
+    try:
+        url = "https://api.cloudflare.com/client/v4/zones"
+        headers = {"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"}
+        response = requests.get(url, headers=headers)
+        result = response.json()
+        
+        if not result.get("success"):
+            logger.error("获取zones失败")
+            return None, None
+            
+        # 查找匹配的zone
+        zone_id = None
+        for zone in result["result"]:
+            if zone["name"] in possible_zones:
+                zone_id = zone["id"]
+                break
+                
+        if not zone_id:
+            logger.error(f"未找到匹配的zone: {domain}")
+            return None, None
+            
+        # 获取DNS记录
+        url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+        params = {"name": domain}
+        response = requests.get(url, headers=headers, params=params)
+        result = response.json()
+        
+        if not result.get("success"):
+            logger.error("获取DNS记录失败")
+            return None, None
+            
+        # 查找匹配的记录
+        for record in result["result"]:
+            if record["name"] == domain:
+                return zone_id, record["id"]
+                
+        logger.error(f"未找到匹配的DNS记录: {domain}")
+        return None, None
+        
+    except Exception as e:
+        logger.error(f"获取zone和record ID时发生错误: {str(e)}")
+        return None, None
+
 # 使用 Click 构建命令行工具
 @click.group()
 def cli():
@@ -141,6 +209,17 @@ def get_cf_record():
         click.echo(f"Cloudflare DNS记录中的IP: {ip}")
     else:
         click.echo("无法从Cloudflare获取DNS记录")
+
+@cli.command()
+@click.argument("domain")
+def get_ids(domain):
+    """获取指定域名的 zone_id 和 record_id"""
+    zone_id, record_id = get_zone_and_record_ids(domain)
+    if zone_id and record_id:
+        click.echo(f"Zone ID: {zone_id}")
+        click.echo(f"Record ID: {record_id}")
+    else:
+        click.echo("未找到匹配的zone和record ID")
 
 @cli.command()
 @click.option("--subject", required=True, help="邮件主题")
